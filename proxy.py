@@ -3,9 +3,10 @@ from __future__ import annotations
 from pwnlib.util.fiddling import hexdump
 from struct import pack,unpack
 from enum import Enum
-import threading
+import queue
 import logging
 import socket
+import select
 import os
 
 from abc import ABC, abstractmethod
@@ -106,12 +107,10 @@ class UDPProxy:
         def __init__(self, proxy):
             super().__init__()
             self._proxy = proxy
-            self._lock = threading.Lock()   #FIXME: temporary solution. Proxy should have a multi-threaded packet FIFO queue instead
 
         def handle(self, packet, direction, *args, **kwargs) -> bytes:
             if packet:
-                with self._lock:
-                    self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
+                self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
             return None # data consumed
 
     def __init__(self, src, dst):
@@ -131,6 +130,8 @@ class UDPProxy:
 
         self._proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._proxy_socket.bind(UDPProxy.parse_endpoint(src))
+
+        self._injection_queue = queue.SimpleQueue() # queue for injected packets
         
         # Always last
         self._data_fwd_handler = self.DataFwdHandler(self)
@@ -163,13 +164,13 @@ class UDPProxy:
 
     def inject_packet(self, packet, direction):
         assert(len(packet) > 0)
-        self._first_handler.handle(packet, direction)
+        self._injection_queue.put((packet, direction))
 
     def run(self):
         LOGGER.debug('Starting UDP proxy...')
         LOGGER.debug('Looping proxy (press Ctrl-Break to stop)...')
 
-        while True:
+        def handle_incoming_data():
             data, address = self._proxy_socket.recvfrom(BUFFER_SIZE)
             
             if self._client_address == None:
@@ -185,5 +186,17 @@ class UDPProxy:
                 assert(False)
 
             self._first_handler.handle(data, direction)
+
+        def handle_injected_packet():
+            data, direction = self._injection_queue.get_nowait()  # since we are the sole consumer, it should not raise
+            self._first_handler.handle(data, direction)
+
+        while True:
+            # wait for data
+            rlist, _, _ = select.select([self._proxy_socket], [], [], 0.100) # timeout is in seconds
+            if len(rlist) > 0 :
+                handle_incoming_data()
+            if not self._injection_queue.empty():
+                handle_injected_packet()
 
 

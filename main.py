@@ -199,7 +199,6 @@ class MazeProxy(proxy.UDPProxy):
                 dispatch_cmd(cmd)
 
 
-
 if __name__ == "__main__":
     os.environ["PYTHONUNBUFFERED"] = "1"
     maze.run_tests() # run the tests
