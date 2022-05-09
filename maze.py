@@ -40,6 +40,7 @@ def decrypt_data(data):
 
 
 class MazePacket(ABC):
+    #TODO: add @classmethod construct() method. See factory pattern
     pass
 
 class HeartBeat_client(MazePacket):
@@ -137,6 +138,16 @@ class Teleport_server(MazePacket):
         self.teleport_player_y = unpack("<i", data[6:10])[0] / 10000.0
         self.teleport_player_z = unpack("<i", data[10:14])[0] / 10000.0
     
+    @classmethod
+    def construct(cls, teleport_instant, teleport_player_x, teleport_player_y, teleport_player_z):
+        obj = cls(b'T'*50)  # doesn't matter. FIXME:
+        obj.teleport_instant  = teleport_instant
+        obj.teleport_player_x = teleport_player_x
+        obj.teleport_player_y = teleport_player_y
+        obj.teleport_player_z = teleport_player_z
+        obj.data = obj.serialize()
+        return obj
+
     def __str__(self):
         return "[{}] tele={} (x,y,z)=({:3.2f}, {:3.2f}, {:3.2f})".format(
             type(self).__name__, self.teleport_instant,
