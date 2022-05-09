@@ -3,6 +3,7 @@ from __future__ import annotations
 from pwnlib.util.fiddling import hexdump
 from struct import pack,unpack
 from enum import Enum
+import threading
 import logging
 import socket
 import os
@@ -30,7 +31,7 @@ class Handler(ABC):
         pass
 
     @abstractmethod
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
+    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         pass
 
 class AbstractHandler(Handler):
@@ -52,18 +53,18 @@ class AbstractHandler(Handler):
         return handler
 
     @abstractmethod
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
+    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         if self._next_handler:
-            return self._next_handler.handle(packet, direction)
+            return self._next_handler.handle(packet, direction, *args, **kwargs)
         else:
             return packet
 
 class NoopHandler(AbstractHandler):
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
-        return super().handle(packet, direction)
+    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+        return super().handle(packet, direction, *args, **kwargs)
 
 class LogHandler(AbstractHandler):
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
+    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
             log_prefix = "client --> server: "
         elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
@@ -77,7 +78,7 @@ class LogHandler(AbstractHandler):
         log_msg += ' (Len %03d)' % len(packet)
         LOGGER.info(log_msg)
 
-        return super().handle(packet, direction)
+        return super().handle(packet, direction, *args, **kwargs)
 
 class UDPProxy:
     PacketAction = Enum('PacketAction', 'FORWARD DROP')
@@ -95,6 +96,18 @@ class UDPProxy:
             ip = socket.gethostbyname(ip)
         return (ip, int(port))
 
+    class DataFwdHandler(AbstractHandler):
+        def __init__(self, proxy):
+            super().__init__()
+            self._proxy = proxy
+            self._lock = threading.Lock()   #FIXME temporary solution. Proxy should have a multi-threaded packet FIFO queue instead
+
+        def handle(self, packet, direction, *args, **kwargs) -> bytes:
+            if packet:
+                with self._lock:
+                    self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
+            return None # data consumed
+
     def __init__(self, src, dst):
         """Run UDP proxy.
         
@@ -102,51 +115,69 @@ class UDPProxy:
         src -- Source IP address and port string. I.e.: '127.0.0.1:8000'
         dst -- Destination IP address and port. I.e.: '127.0.0.1:8888'
         """
-        self._src_endpoint = src
-        self._dst_endpoint = dst
+        LOGGER.debug("Creating Proxy")
+        LOGGER.debug(' [*] Src: {}'.format(src))
+        LOGGER.debug(' [*] Dst: {}'.format(dst))
+
+        self._client_address = None
+        self._server_address = UDPProxy.parse_endpoint(dst, True)
+        LOGGER.debug('   [*] {}'.format(self._server_address[0]))
+
+        self._proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._proxy_socket.bind(UDPProxy.parse_endpoint(src))
         
-        handler = NoopHandler()
-        self._first_handler = handler
-        self._last_handler  = handler
+        # Always last
+        self._data_fwd_handler = self.DataFwdHandler(self)
+
+        # first handler
+        self._first_handler = self._data_fwd_handler
+
+        # One handler before the DataFwdHandler()
+        self._prelast_handler  = None
     
     def append_handler(self, handler):
-        self._last_handler.add_next(handler)
-        self._last_handler = handler
+        if self._first_handler == self._data_fwd_handler:
+            assert(self._prelast_handler == None)
+            handler.add_next(self._data_fwd_handler)
+            self._first_handler = handler
+        else:
+            handler.add_next(self._data_fwd_handler)
+            self._prelast_handler.add_next(handler)
+        
+        self._prelast_handler = handler
         return self
+
+    def _get_fwd_addr(self, direction):
+        if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
+            return self._server_address
+        elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
+            return self._client_address
+        else:
+            assert(False)
+
+    def inject_packet(self, packet, direction):
+        assert(len(packet) > 0)
+        self._first_handler.handle(packet, direction)
 
     def run(self):
         LOGGER.debug('Starting UDP proxy...')
-        LOGGER.debug('Src: {}'.format(self._src_endpoint))
-        LOGGER.debug('Dst: {}'.format(self._dst_endpoint))
-        
-        proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        proxy_socket.bind(UDPProxy.parse_endpoint(self._src_endpoint))
-        
-        client_address = None
-        server_address = UDPProxy.parse_endpoint(self._dst_endpoint, True)
-        LOGGER.debug(' [*] {}'.format(server_address[0]))
-        
         LOGGER.debug('Looping proxy (press Ctrl-Break to stop)...')
-        while True:
-            data, address = proxy_socket.recvfrom(BUFFER_SIZE)
-            
-            if client_address == None:
-                client_address = address
-                LOGGER.info("Client {} connected!".format(client_address))
 
-            if address == client_address:
-                fwd_address = server_address
+        while True:
+            data, address = self._proxy_socket.recvfrom(BUFFER_SIZE)
+            
+            if self._client_address == None:
+                self._client_address = address
+                LOGGER.info("Client {} connected!".format(self._client_address))
+
+            if address == self._client_address:
                 direction = UDPProxy.PacketDirection.CLIENT_TO_SERVER
-            elif address == server_address:
-                fwd_address = client_address
+            elif address == self._server_address:
                 direction = UDPProxy.PacketDirection.SERVER_TO_CLIENT
             else:
                 LOGGER.error('Unknown address: {}'.format(str(address)))
                 assert(False)
 
-            data = self._first_handler.handle(data, direction)
-            if data:
-                proxy_socket.sendto(data, fwd_address)
-
+            self._first_handler.handle(data, direction)
 
 

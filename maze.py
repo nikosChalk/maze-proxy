@@ -1,5 +1,6 @@
 
 from struct import pack,unpack
+from abc import ABC, abstractmethod
 
 
 def encrypt_data(data, rand1, rand2):
@@ -38,8 +39,10 @@ def decrypt_data(data):
     return bytes(decryptedPkt)
 
 
+class MazePacket(ABC):
+    pass
 
-class HeartBeat_client:
+class HeartBeat_client(MazePacket):
     '''
         [0]     : '<'
         [1]     : '3'
@@ -53,7 +56,7 @@ class HeartBeat_client:
     def __str__(self):
         return "[{}] usersecret={}".format(type(self).__name__, self.usersecret.hex())
 
-class Position_client:
+class Position_client(MazePacket):
     '''
         [0]     : 'P'
         [1:9]   : usersecret[0:8]
@@ -118,7 +121,7 @@ class Position_client:
         #####
         return bs
 
-class Teleport_server:
+class Teleport_server(MazePacket):
     '''
     [0]     : 'T'
     [1]     : (__this->fields).teleport_instant
@@ -148,7 +151,7 @@ class Teleport_server:
         bs += pack("<i", int(self.teleport_player_z * 10000.0))
         return bs
 
-class HeartBeat_server:
+class HeartBeat_server(MazePacket):
     '''
         [0]     : <cmd byte> == 0x3c
         [1]     : '3'
