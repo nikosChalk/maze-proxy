@@ -31,11 +31,17 @@ class MazeProxy(proxy.UDPProxy):
             return super().handle(ciphertext_packet, direction)
 
     def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         decryptionHandler = self.DecryptionHandler(self)
+        logHandler        = proxy.LogHandler()
         encryptionHandler = self.EncryptionHandler(self)
 
-        decryptionHandler.add_next(encryptionHandler)
-        super().__init__(handler=decryptionHandler, *args, **kwargs)
+        
+        super() \
+            .append_handler(decryptionHandler) \
+            .append_handler(logHandler) \
+            .append_handler(encryptionHandler)
+
         self._last_Position_client = None
         self._current_key = (None, None)
 

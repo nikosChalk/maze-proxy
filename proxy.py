@@ -58,6 +58,9 @@ class AbstractHandler(Handler):
         else:
             return packet
 
+class NoopHandler(AbstractHandler):
+    def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
+        return super().handle(packet, direction)
 
 class LogHandler(AbstractHandler):
     def handle(self, packet: Any, direction: UDPProxy.PacketDirection) -> bytes:
@@ -67,7 +70,7 @@ class LogHandler(AbstractHandler):
             log_prefix = "server --> client: "
         
         log_msg = log_prefix + hexdump(packet[:24], width=24, groupsize=8, total=False)[10:]
-        if len(log_msg) > 24:
+        if len(packet) > 24:
             log_msg += ' ...'
         else:
             log_msg += ' '*(24-len(packet)+4)
@@ -92,7 +95,7 @@ class UDPProxy:
             ip = socket.gethostbyname(ip)
         return (ip, int(port))
 
-    def __init__(self, src, dst, handler=None):
+    def __init__(self, src, dst):
         """Run UDP proxy.
         
         Arguments:
@@ -101,10 +104,15 @@ class UDPProxy:
         """
         self._src_endpoint = src
         self._dst_endpoint = dst
-        self._handler = LogHandler()
-        if handler:
-            self._handler.add_next(handler)
-
+        
+        handler = NoopHandler()
+        self._first_handler = handler
+        self._last_handler  = handler
+    
+    def append_handler(self, handler):
+        self._last_handler.add_next(handler)
+        self._last_handler = handler
+        return self
 
     def run(self):
         LOGGER.debug('Starting UDP proxy...')
@@ -136,7 +144,7 @@ class UDPProxy:
                 LOGGER.error('Unknown address: {}'.format(str(address)))
                 assert(False)
 
-            data = self._handler.handle(data, direction)
+            data = self._first_handler.handle(data, direction)
             if data:
                 proxy_socket.sendto(data, fwd_address)
 
