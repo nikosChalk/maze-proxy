@@ -6,6 +6,7 @@ from pwnlib.tubes import listen
 import threading
 import logging
 import socket
+import copy
 import os
 import proxy
 import maze
@@ -110,6 +111,37 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
         with self._lock:
             self._last_Position_client = position
 
+    def get_last_Position_client(self):
+        with self._lock:
+            res = copy.deepcopy(self._last_Position_client)
+        return res
+
+class MazeProxy(proxy.UDPProxy):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        blacklist = [maze.HeartBeat_client, maze.HeartBeat_server]
+        def log_condition_cb(packet, direction, *args, **kwargs):
+            parsed = kwargs['parsed']
+            if not parsed:
+                return True
+            return parsed.__class__ not in blacklist
+
+        cipherSuiteHandlers = CipherSuiteHandlers()
+        self._myMazeDispatchHandler = MyMazeDispatchHandler()
+        self.append_handler(cipherSuiteHandlers.decryptionHandler) \
+            .append_handler(MazeParsingHandler()) \
+            .append_handler(proxy.LogHandler(log_condition_cb)) \
+            .append_handler(ParsedLogHandler(blacklist)) \
+            .append_handler(self._myMazeDispatchHandler) \
+            .append_handler(cipherSuiteHandlers.encryptionHandler)
+
+    def run(self):
+        injector_thread = threading.Thread(target=self.command_injector)
+        injector_thread.start()
+        super().run()
+        injector_thread.join()
+
     def command_injector(self):
         def wait_for_client():
             l = listen.listen(12345, '127.0.0.1', 'ipv4')
@@ -134,20 +166,19 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
                 direction = last_direction
             elif cmd.startswith("reltp"):    # reltp X Y Z 
                 x, y, z = [float(x) for x in cmd.split()[1:]]
-                with self._lock:
-                    plaintext_packet = maze.Teleport_server.construct(
-                        1, 
-                        self._last_Position_client.positionX + x,
-                        self._last_Position_client.positionY + y,
-                        self._last_Position_client.positionZ + z
-                    ).serialize()
+                last_pos = self._myMazeDispatchHandler.get_last_Position_client()
+                plaintext_packet = maze.Teleport_server.construct(
+                    1, 
+                    last_pos.positionX + x,
+                    last_pos.positionY + y,
+                    last_pos.positionZ + z
+                ).serialize()
                 direction = proxy.UDPProxy.PacketDirection.SERVER_TO_CLIENT
             elif cmd.startswith("tp"):    # tp X Y Z 
                 x, y, z = [float(x) for x in cmd.split()[1:]]
-                with self._lock:
-                    plaintext_packet = maze.Teleport_server.construct(
-                        1, x, y, z
-                    ).serialize()
+                plaintext_packet = maze.Teleport_server.construct(
+                    1, x, y, z
+                ).serialize()
                 direction = proxy.UDPProxy.PacketDirection.SERVER_TO_CLIENT
             else:
                 LOGGER.warning("[injector] Unknown command: " + cmd)
@@ -155,7 +186,7 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
             if plaintext_packet:
                 assert(direction)
                 encrypted_packet = maze.encrypt_data(plaintext_packet, rand1, rand2)
-                maze_proxy.inject_packet(encrypted_packet, direction)
+                self.inject_packet(encrypted_packet, direction)
                 last_plaintext_packet = plaintext_packet
                 last_direction = direction
 
@@ -168,36 +199,11 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
                 dispatch_cmd(cmd)
 
 
-class MazeProxy(proxy.UDPProxy):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        blacklist = [maze.HeartBeat_client, maze.HeartBeat_server]
-        def log_condition_cb(packet, direction, *args, **kwargs):
-            parsed = kwargs['parsed']
-            if not parsed:
-                return True
-            return parsed.__class__ not in blacklist
-
-        cipherSuiteHandlers = CipherSuiteHandlers()
-        self.myMazeDispatchHandler = MyMazeDispatchHandler()
-        self.append_handler(cipherSuiteHandlers.decryptionHandler) \
-            .append_handler(MazeParsingHandler()) \
-            .append_handler(proxy.LogHandler(log_condition_cb)) \
-            .append_handler(ParsedLogHandler(blacklist)) \
-            .append_handler(self.myMazeDispatchHandler) \
-            .append_handler(cipherSuiteHandlers.encryptionHandler)
-
 
 if __name__ == "__main__":
     os.environ["PYTHONUNBUFFERED"] = "1"
     maze.run_tests() # run the tests
 
     maze_proxy = MazeProxy('0.0.0.0:1337', 'original.game.liveoverflo:1337')
-    injector_thread = threading.Thread(target=maze_proxy.myMazeDispatchHandler.command_injector)
-    injector_thread.start()
-
     maze_proxy.run()
-
-    injector_thread.join()
     exit(0)

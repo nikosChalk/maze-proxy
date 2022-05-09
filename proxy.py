@@ -106,7 +106,7 @@ class UDPProxy:
         def __init__(self, proxy):
             super().__init__()
             self._proxy = proxy
-            self._lock = threading.Lock()   #FIXME temporary solution. Proxy should have a multi-threaded packet FIFO queue instead
+            self._lock = threading.Lock()   #FIXME: temporary solution. Proxy should have a multi-threaded packet FIFO queue instead
 
         def handle(self, packet, direction, *args, **kwargs) -> bytes:
             if packet:
