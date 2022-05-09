@@ -64,19 +64,25 @@ class NoopHandler(AbstractHandler):
         return super().handle(packet, direction, *args, **kwargs)
 
 class LogHandler(AbstractHandler):
+
+    def __init__(self, cond_cb=None):
+        super().__init__()
+        self._cond_cb = cond_cb
+
     def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
-        if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
-            log_prefix = "client --> server: "
-        elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
-            log_prefix = "server --> client: "
-        
-        log_msg = log_prefix + hexdump(packet[:24], width=24, groupsize=8, total=False)[10:]
-        if len(packet) > 24:
-            log_msg += ' ...'
-        else:
-            log_msg += ' '*(24-len(packet)+4)
-        log_msg += ' (Len %03d)' % len(packet)
-        LOGGER.info(log_msg)
+        if not self._cond_cb or self._cond_cb(packet, direction, *args, **kwargs):
+            if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
+                log_prefix = "client --> server: "
+            elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
+                log_prefix = "server --> client: "
+            
+            log_msg = log_prefix + hexdump(packet[:24], width=24, groupsize=8, total=False)[10:]
+            if len(packet) > 24:
+                log_msg += ' ...'
+            else:
+                log_msg += ' '*(24-len(packet)+4)
+            log_msg += ' (Len %03d)' % len(packet)
+            LOGGER.info(log_msg)
 
         return super().handle(packet, direction, *args, **kwargs)
 

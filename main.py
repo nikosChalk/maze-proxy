@@ -84,9 +84,13 @@ class MazeDispatchHandler(proxy.AbstractHandler):
 
 
 class ParsedLogHandler(proxy.AbstractHandler):
+    def __init__(self, blacklist=[]):
+        super().__init__()
+        self._blacklist = blacklist
+
     def handle(self, packet, direction, *args, **kwargs) -> bytes:
         parsed=kwargs['parsed']
-        if parsed:
+        if parsed and (parsed.__class__ not in self._blacklist):
             LOGGER.log(logging.INFO, str(parsed), )
         return super().handle(packet, direction, *args, **kwargs)
 
@@ -95,14 +99,20 @@ class MazeProxy(proxy.UDPProxy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         cipherSuiteHandlers = CipherSuiteHandlers()
-        logHandler          = proxy.LogHandler()
         mazeParsingHandler  = MazeParsingHandler()
         mazeDispatchHandler = MazeDispatchHandler()
 
+        blacklist = [maze.HeartBeat_client, maze.HeartBeat_server]
+        def log_condition_cb(packet, direction, *args, **kwargs):
+            parsed = kwargs['parsed']
+            if not parsed:
+                return True
+            return parsed.__class__ not in blacklist
+
         self.append_handler(cipherSuiteHandlers.decryptionHandler) \
-            .append_handler(logHandler) \
             .append_handler(mazeParsingHandler) \
-            .append_handler(ParsedLogHandler()) \
+            .append_handler(proxy.LogHandler(log_condition_cb)) \
+            .append_handler(ParsedLogHandler(blacklist)) \
             .append_handler(mazeDispatchHandler) \
             .append_handler(cipherSuiteHandlers.encryptionHandler)
 
