@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 from pwnlib.util.fiddling import hexdump
-from struct import pack,unpack
 from enum import Enum
 import queue
 import logging
@@ -14,11 +13,8 @@ from typing import Any, Optional, Tuple
 
 FORMAT = '%(asctime)-15s %(levelname)-7s %(message)s'
 LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
-CUSTOM_LOGGING_LVL=99
-logging.addLevelName(CUSTOM_LOGGING_LVL, "CUSTOM_LOGGING")
 logging.basicConfig(format=FORMAT, level=LOGLEVEL)
 LOGGER = logging.getLogger()
-BUFFER_SIZE = 1024
 
 
 class Handler(ABC):
@@ -52,7 +48,7 @@ class Handler(ABC):
 
 class AbstractHandler(Handler):
     """
-    The default chaining behavior is implemented here.
+    The default chaining behavior is implemented here. It is to forward the packet to the next handler
     """
 
     def __init__(self):
@@ -74,12 +70,23 @@ class AbstractHandler(Handler):
             return packet
 
 class NoopHandler(AbstractHandler):
+    """Handler that is a no-op on the packet"""
     def handle(self, packet: bytes, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         return super().handle(packet, direction, *args, **kwargs)
 
-class LogHandler(AbstractHandler):
+class LogShortHexHandler(AbstractHandler):
+    """
+    Logs the packet if a condition is satisfied.
+    For the packet, its directions, its first 24 bytes in hexdump format, and its length are logged.
+    """
 
     def __init__(self, cond_cb=None):
+        """
+        Args:
+            cond_cb (lambda packet, direction, *args, **kwargs : bool, optional): A callable that gets passed
+            the parameters of the handle() to determine if the packet will be logged or not.
+            Default value allows the packet to be always logged.
+        """
         super().__init__()
         self._cond_cb = cond_cb
 
@@ -101,32 +108,45 @@ class LogHandler(AbstractHandler):
         return super().handle(packet, direction, *args, **kwargs)
 
 class UDPProxy:
+    """
+    An implementation of a simple, yet flexible UDP proxy.
+    It currently supports 1-to-1 client-server connections, as UDP is not connection-oriented.
+    """
+
     PacketAction = Enum('PacketAction', 'FORWARD DROP')
     PacketDirection = Enum('PacketDirection', 'CLIENT_TO_SERVER SERVER_TO_CLIENT')
+    BUFFER_SIZE = 1024
 
     @staticmethod
-    def parse_endpoint(ip, resolve=False):
-        """Parse IP string and return (ip, port) tuple.
-        
-        Arguments:
-        ip -- IP address:port string. I.e.: '127.0.0.1:8000'.
+    def parse_endpoint(ip:str, resolve=False) -> Tuple[str, int]:
+        """Parses IP string and returns (ip, port) tuple.
+
+        Args:
+            ip (str): "address:port" string. I.e.: '127.0.0.1:8000'.
+            resolve (bool, optional): If the given ip should be treated as a hostname and has
+            to be resolved first. Defaults to False.
+
+        Returns:
+            Tuple[str, int]: (ip, port)
         """
-        ip, port = ip.split(':')
+        ip, port = ip.strip().split(':')
         if resolve:
             ip = socket.gethostbyname(ip)
         return (ip, int(port))
 
     class DataFwdHandler(AbstractHandler):
-        def __init__(self, proxy):
+        """Handler that sends the packet to its destination via a socket"""
+        def __init__(self, proxy: UDPProxy):
             super().__init__()
             self._proxy = proxy
 
         def handle(self, packet, direction, *args, **kwargs):
             self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
-            return packet # We are always last in chain
+            return packet # We must always be last in chain
 
-    def __init__(self, src, dst):
-        """Run UDP proxy.
+    def __init__(self, src:str, dst:str):
+        """Creates the UDP proxy.
+        The proxy is not listening for packets until run() is invoked.
         
         Arguments:
         src -- Source IP address and port string. I.e.: '127.0.0.1:8000'
@@ -136,6 +156,7 @@ class UDPProxy:
         LOGGER.debug(' [*] Src: {}'.format(src))
         LOGGER.debug(' [*] Dst: {}'.format(dst))
 
+        # (ip, port) tuples
         self._client_address = None
         self._server_address = UDPProxy.parse_endpoint(dst, True)
         LOGGER.debug('   [*] {}'.format(self._server_address[0]))
@@ -143,7 +164,8 @@ class UDPProxy:
         self._proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._proxy_socket.bind(UDPProxy.parse_endpoint(src))
 
-        self._injection_queue = queue.SimpleQueue() # queue for injected packets
+        # queue for injected packets
+        self._injection_queue = queue.SimpleQueue()
         
         # Always last
         self._data_fwd_handler = self.DataFwdHandler(self)
@@ -154,7 +176,14 @@ class UDPProxy:
         # One handler before the DataFwdHandler()
         self._prelast_handler  = None
     
-    def append_handler(self, handler):
+    def append_handler(self, handler: AbstractHandler) -> UDPProxy:
+        """Appends the given handler at the end of the processing queue
+
+        Returns:
+            UDPProxy: self. So that you can chain multiple invocations. 
+            e.g.: proxy.append_handler(foo).append_handler(bar) 
+            This results in the processing order: input --> foo --> bar --> send to destination
+        """
         if self._first_handler == self._data_fwd_handler:
             assert(self._prelast_handler == None)
             handler.add_next(self._data_fwd_handler)
@@ -166,7 +195,7 @@ class UDPProxy:
         self._prelast_handler = handler
         return self
 
-    def _get_fwd_addr(self, direction):
+    def _get_fwd_addr(self, direction: UDPProxy.PacketDirection) -> Tuple[str, int]:
         if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
             return self._server_address
         elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
@@ -174,16 +203,26 @@ class UDPProxy:
         else:
             assert(False)
 
-    def inject_packet(self, packet, direction):
+    def inject_packet(self, packet: bytes, direction: UDPProxy.PacketDirection) -> None:
+        """Injects the given packet into the communication between client and server.
+        The packet will be processed normally by the handler chain.
+        Useful if you want to inject spoofed packets.
+
+        Args:
+            packet (bytes): The packet to inject
+            direction (UDPProxy.PacketDirection): The direction that the packet will travel to
+        """
         assert(len(packet) > 0)
         self._injection_queue.put((packet, direction))
 
-    def run(self):
+    def run(self) -> None:
+        """Starts the proxy and listens for incoming packets. This method never returns."""
+
         LOGGER.debug('Starting UDP proxy...')
         LOGGER.debug('Looping proxy (press Ctrl-Break to stop)...')
 
         def handle_incoming_data():
-            data, address = self._proxy_socket.recvfrom(BUFFER_SIZE)
+            data, address = self._proxy_socket.recvfrom(self.BUFFER_SIZE)
             
             if self._client_address == None:
                 self._client_address = address

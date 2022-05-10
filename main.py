@@ -11,7 +11,7 @@ import os
 import proxy
 import maze
 
-LOGGER=proxy.LOGGER
+LOGGER = logging.getLogger()
 
 class CipherSuiteHandlers:
     class DecryptionHandler(proxy.AbstractHandler):
@@ -120,10 +120,10 @@ class MazeProxy(proxy.UDPProxy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        blacklist = [maze.HeartBeat_client, maze.HeartBeat_server]
+        blacklist = [maze.HeartBeat_client, maze.HeartBeat_server] # filterout heartbeats from logs
         def log_condition_cb(packet, direction, *args, **kwargs):
             parsed = kwargs['parsed']
-            if not parsed:
+            if not parsed:  # log all unknown packets
                 return True
             return parsed.__class__ not in blacklist
 
@@ -131,7 +131,7 @@ class MazeProxy(proxy.UDPProxy):
         self._myMazeDispatchHandler = MyMazeDispatchHandler()
         self.append_handler(cipherSuiteHandlers.decryptionHandler) \
             .append_handler(MazeParsingHandler()) \
-            .append_handler(proxy.LogHandler(log_condition_cb)) \
+            .append_handler(proxy.LogShortHexHandler(log_condition_cb)) \
             .append_handler(ParsedLogHandler(blacklist)) \
             .append_handler(self._myMazeDispatchHandler) \
             .append_handler(cipherSuiteHandlers.encryptionHandler)
@@ -154,14 +154,8 @@ class MazeProxy(proxy.UDPProxy):
             except EOFError as err:
                 return None
         
-        last_cmd = None
-        rand1, rand2 = (0xC0, 0xFE) #COFE!
         def dispatch_cmd(cmd):
-            nonlocal last_cmd, rand1, rand2
-            if cmd == "r": # repeat
-                cmd = last_cmd
-            else:
-                last_cmd = cmd
+            rand1, rand2 = (0xC0, 0xFE) #COFE!
             
             plaintext_packet, direction = (None, None)
             if cmd.startswith("reltp"):    # reltp X Y Z 
@@ -182,19 +176,32 @@ class MazeProxy(proxy.UDPProxy):
                 direction = proxy.UDPProxy.PacketDirection.SERVER_TO_CLIENT
             else:
                 LOGGER.warning("[injector] Unknown command: " + cmd)
+                return False
             
             if plaintext_packet:
                 assert(direction)
                 encrypted_packet = maze.encrypt_data(plaintext_packet, rand1, rand2)
                 self.inject_packet(encrypted_packet, direction)
+            return True
 
+        last_cmd = None
         while True:
             l = wait_for_client()
+            
             while True:
                 cmd = read_command(l)
                 if cmd == None: # client disconnected
                     break
-                dispatch_cmd(cmd)
+                elif cmd == "r": # repeat
+                    if last_cmd == None:
+                        continue
+                    cmd = last_cmd
+                try:
+                    success = dispatch_cmd(cmd)
+                    if success:
+                        last_cmd = cmd
+                except Exception as ex: # gracefully handle malformed commands
+                    print(str(ex))
 
 
 if __name__ == "__main__":
