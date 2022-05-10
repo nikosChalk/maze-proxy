@@ -25,20 +25,34 @@ class Handler(ABC):
     """
     The Handler interface declares a method for building the chain of handlers.
     It also declares a method for executing a request.
+    (Similar to chain of responsibility pattern)
     """
 
     @abstractmethod
     def add_next(self, handler: Handler) -> Handler:
+        """Sets the next handler to be invoked
+
+        Returns:
+            Handler: The passed handler
+        """
         pass
 
     @abstractmethod
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+    def handle(self, packet: bytes, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+        """Handles the given packet by reading and/or modifying it.
+
+        Args:
+            packet (bytes): The packet to handle
+            direction (UDPProxy.PacketDirection): The direction that the packer is travelling towards to.
+
+        Returns:
+            bytes: The modified packet
+        """
         pass
 
 class AbstractHandler(Handler):
     """
-    The default chaining behavior can be implemented inside a base handler
-    class.
+    The default chaining behavior is implemented here.
     """
 
     def __init__(self):
@@ -48,20 +62,19 @@ class AbstractHandler(Handler):
     def add_next(self, handler: Handler) -> Handler:
         self._next_handler = handler
 
-        # Returning a handler from here will let us link handlers in a
-        # convenient way like this:
+        # Returning a handler from here will let us link handlers in a convenient way like this:
         # monkey.add_next(squirrel).add_next(dog)
         return handler
 
     @abstractmethod
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+    def handle(self, packet: bytes, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         if self._next_handler:
             return self._next_handler.handle(packet, direction, *args, **kwargs)
         else:
             return packet
 
 class NoopHandler(AbstractHandler):
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+    def handle(self, packet: bytes, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
         return super().handle(packet, direction, *args, **kwargs)
 
 class LogHandler(AbstractHandler):
@@ -70,7 +83,7 @@ class LogHandler(AbstractHandler):
         super().__init__()
         self._cond_cb = cond_cb
 
-    def handle(self, packet: Any, direction: UDPProxy.PacketDirection, *args, **kwargs) -> bytes:
+    def handle(self, packet, direction, *args, **kwargs):
         if not self._cond_cb or self._cond_cb(packet, direction, *args, **kwargs):
             if direction == UDPProxy.PacketDirection.CLIENT_TO_SERVER:
                 log_prefix = "client --> server: "
@@ -108,10 +121,9 @@ class UDPProxy:
             super().__init__()
             self._proxy = proxy
 
-        def handle(self, packet, direction, *args, **kwargs) -> bytes:
-            if packet:
-                self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
-            return None # data consumed
+        def handle(self, packet, direction, *args, **kwargs):
+            self._proxy._proxy_socket.sendto(packet, self._proxy._get_fwd_addr(direction))
+            return packet # We are always last in chain
 
     def __init__(self, src, dst):
         """Run UDP proxy.

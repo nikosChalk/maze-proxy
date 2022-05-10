@@ -19,7 +19,7 @@ class CipherSuiteHandlers:
             super().__init__()
             self._outer = outer
 
-        def handle(self, packet, direction, *args, **kwargs) -> bytes:
+        def handle(self, packet, direction, *args, **kwargs):
             plaintext_packet = maze.decrypt_data(packet)
             self._outer._current_key = (packet[0], packet[1])
             return super().handle(plaintext_packet, direction, *args, **kwargs)
@@ -29,7 +29,7 @@ class CipherSuiteHandlers:
             super().__init__()
             self._outer = outer
         
-        def handle(self, packet, direction, *args, **kwargs) -> bytes:
+        def handle(self, packet, direction, *args, **kwargs):
             ciphertext_packet = maze.encrypt_data(packet, *self._outer._current_key)
             return super().handle(ciphertext_packet, direction, *args, **kwargs)
     
@@ -51,7 +51,7 @@ class MazeParsingHandler(proxy.AbstractHandler):
         }
     }
 
-    def handle(self, packet, direction, *args, **kwargs) -> bytes:
+    def handle(self, packet, direction, *args, **kwargs):
         parsed = None
         control_byte = packet[0]
         packet_cls = MazeParsingHandler.class_mapping[direction].get(control_byte, None)
@@ -79,7 +79,7 @@ class MazeDispatchHandler(proxy.AbstractHandler):
             maze.Teleport_server    :   self.Teleport_server_dispatcher
         }
 
-    def handle(self, packet, direction, *args, **kwargs) -> bytes:
+    def handle(self, packet, direction, *args, **kwargs):
         parsed = kwargs['parsed']
         if parsed:
             self.dispatcher[parsed.__class__](parsed)
@@ -93,7 +93,7 @@ class ParsedLogHandler(proxy.AbstractHandler):
         super().__init__()
         self._blacklist = blacklist
 
-    def handle(self, packet, direction, *args, **kwargs) -> bytes:
+    def handle(self, packet, direction, *args, **kwargs):
         parsed=kwargs['parsed']
         if parsed and (parsed.__class__ not in self._blacklist):
             LOGGER.log(logging.INFO, "  " + str(parsed), )
@@ -154,17 +154,17 @@ class MazeProxy(proxy.UDPProxy):
             except EOFError as err:
                 return None
         
-        last_plaintext_packet = None
-        last_direction = None
+        last_cmd = None
         rand1, rand2 = (0xC0, 0xFE) #COFE!
         def dispatch_cmd(cmd):
-            nonlocal last_plaintext_packet, last_direction, rand1, rand2
-
-            plaintext_packet, direction = (None, None)
+            nonlocal last_cmd, rand1, rand2
             if cmd == "r": # repeat
-                plaintext_packet = last_plaintext_packet
-                direction = last_direction
-            elif cmd.startswith("reltp"):    # reltp X Y Z 
+                cmd = last_cmd
+            else:
+                last_cmd = cmd
+            
+            plaintext_packet, direction = (None, None)
+            if cmd.startswith("reltp"):    # reltp X Y Z 
                 x, y, z = [float(x) for x in cmd.split()[1:]]
                 last_pos = self._myMazeDispatchHandler.get_last_Position_client()
                 plaintext_packet = maze.Teleport_server.construct(
@@ -187,8 +187,6 @@ class MazeProxy(proxy.UDPProxy):
                 assert(direction)
                 encrypted_packet = maze.encrypt_data(plaintext_packet, rand1, rand2)
                 self.inject_packet(encrypted_packet, direction)
-                last_plaintext_packet = plaintext_packet
-                last_direction = direction
 
         while True:
             l = wait_for_client()
