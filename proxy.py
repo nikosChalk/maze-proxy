@@ -80,15 +80,17 @@ class LogShortHexHandler(AbstractHandler):
     For the packet, its directions, its first 24 bytes in hexdump format, and its length are logged.
     """
 
-    def __init__(self, cond_cb=None):
+    def __init__(self, cond_cb=None, print_direction=True):
         """
         Args:
             cond_cb (lambda packet, direction, *args, **kwargs : bool, optional): A callable that gets passed
             the parameters of the handle() to determine if the packet will be logged or not.
             Default value allows the packet to be always logged.
+            print_direction : bool, optional: If a "client --> server" or similar message should be part of the log
         """
         super().__init__()
         self._cond_cb = cond_cb
+        self._print_direction = print_direction
 
     def handle(self, packet, direction, *args, **kwargs):
         if not self._cond_cb or self._cond_cb(packet, direction, *args, **kwargs):
@@ -97,6 +99,9 @@ class LogShortHexHandler(AbstractHandler):
             elif direction == UDPProxy.PacketDirection.SERVER_TO_CLIENT:
                 log_prefix = "server --> client: "
             
+            if not self._print_direction:
+                log_prefix = " "*len(log_prefix)
+
             log_msg = log_prefix + hexdump(packet[:24], width=24, groupsize=8, total=False)[10:]
             if len(packet) > 24:
                 log_msg += ' ...'
