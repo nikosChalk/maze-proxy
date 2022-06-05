@@ -39,23 +39,90 @@ def decrypt_data(data):
     return bytes(decryptedPkt)
 
 
+MAPPED_EMOJIS = {   # Emojis that are mapped to keys
+    '1': 0x17,  # KeyCode '1'
+    '2': 0x16,  # KeyCode '2'
+    '3': 0x04,  # KeyCode '3'
+    '4': 0x12,  # KeyCode '4'
+    '5': 0x0c,  # KeyCode '5'
+    '6': 0x0a,  # KeyCode '6'
+    '7': 0x14,  # KeyCode '7'
+    '8': 0x0e,  # KeyCode '8'
+    '9': 0x03,  # KeyCode '9'
+    '0': 0x08   # KeyCode '0'
+}
+ALL_EMOJIS = list(range(1,25))  # emoji 13 is a flag
+
 class MazePacket(ABC):
     #TODO: add @classmethod construct() method. See factory pattern
     pass
+
+# usersecret = SHA256(<secret on login screen>)[0:8]
+
+
+class Login_client(MazePacket):
+    '''
+        Packet is always 42 bytes long
+        [0]     : 'L'
+        [01:09] : (__this->fields).usersecret
+        [9]     : (__this->fields).username.m_stringLength
+        [10:10+username_length] : (__this->fields).username
+        [10+username_length:42] : garbage
+    '''
+
+    def __init__(self, data):
+        assert(data[0] == ord('L'))
+        assert(len(data) == 42)
+        self.usersecret = data[1:9]
+        username_len = data[9]
+        self.username = data[10:10+username_len].decode('ascii')
+
+    def __str__(self):
+        return "[{}] usersecret={} username={}".format(type(self).__name__, self.usersecret.hex(), self.username)
+
 
 class HeartBeat_client(MazePacket):
     '''
         [0]     : '<'
         [1]     : '3'
-        [02:10] : Partial user secret == SHA256(<secret on login>)[0:8]. The full hash is 32 bytes
+        [02:10] : (__this->fields).usersecret
+        [10:18] : (__this->fields).time * 10000.0
     '''
     def __init__(self, data):
-        '''usersecret - Partial user secret. 8 bytes'''
+        assert(data[:2] == b'<3')
         self.usersecret = data[2:10]
-        #FIXME: time
+        self.time = unpack("<q", data[10:18])[0] / 10000.0
 
     def __str__(self):
-        return "[{}] usersecret={}".format(type(self).__name__, self.usersecret.hex())
+        return "[{}] usersecret={} time={:.3f}secs".format(type(self).__name__, self.usersecret.hex(), self.time)
+
+class Emoji_client(MazePacket):
+    '''
+        [0]     : 'E'
+        [01:09] : (__this->fields).usersecret
+        [9]     : emoji
+    '''
+    def __init__(self, data):
+        assert(data[0] == ord('E'))
+        assert(len(data) == 10)
+        self.usersecret = data[1:9]
+        self.emoji = data[9]
+
+    def __str__(self):
+        return "[{}] usersecret={} emoji={}".format(type(self).__name__, self.usersecret.hex(), self.emoji)
+    
+    @classmethod
+    def construct(cls, usersecret, emoji):
+        obj = cls(b'E'*10)  # doesn't matter. FIXME:
+        obj.usersecret = usersecret
+        obj.emoji = emoji
+        return obj
+
+    def serialize(self):
+        bs  = b'E'
+        bs += self.usersecret
+        bs += bytes([self.emoji])
+        return bs
 
 class Position_client(MazePacket):
     '''
@@ -121,6 +188,64 @@ class Position_client(MazePacket):
         # bs[45] = 
         #####
         return bs
+    
+
+class LoginConfirm_server(MazePacket):
+    '''
+        [0]     : 'L'
+        [1:5]   : (__this->fields).uid
+        [5:7]   : (__this->fields).unlocks
+        [7]     : version   # Gets compared with (__this->fields).version
+    '''
+
+    def __init__(self, data):
+        assert(data[0] == ord('L'))
+        self.uid = unpack("<I", data[1:5])[0]
+        self.unlocks = unpack("<H", data[5:7])[0]
+        self.version = data[7]
+
+    def __str__(self):
+        return "[{}] uid={} unlocks=0x{:04x} version=0x{:x}".format(
+            type(self).__name__, self.uid, self.unlocks, self.version
+        )
+
+
+class HeartBeat_server(MazePacket):
+    '''
+        [0]     : '<'
+        [1]     : '3'
+        [02:10] : client_time # to compute RTT (ping).
+            The client_time is the time present in the last received HeartBeat_client packet
+            (__this->fields).heartbeat_roundtrip = (__this->fields).time - (client_time / 10000.0)
+        [10:18] : server_time
+            Initializes (__this->fields).start_server_time on the first packet received
+            Subsequent values are used to calculate (__this->fields).server_time
+            100ticks of this counter correspond to 1 second.
+            server_time / 100 == how long the server has been running in seconds
+    '''
+    def __init__(self, data):
+        assert(data[:2] == b'<3')
+        self.client_time = unpack("<q", data[2:10])[0] / 10000.0
+        self.servertime = unpack("<q", data[10:18])[0]
+
+    def __str__(self):
+        return "[{}] client_time={:.3f}secs servertime={:.2f}secs".format(type(self).__name__, self.client_time, (self.servertime / 100))
+
+class Emoji_server(MazePacket):
+    '''
+        [0]     : 'E'
+        [01:05] : uid           # Same as the uid field in the LoginConfirm_server packet
+        [05:09] : servertime    # Same as the ((servertime field) / 100)) in the last HeartBeat_server packet
+        [9]     : emoji         # Same as the emoji field in the corresponding Emoji_client packet
+    '''
+    def __init__(self, data):
+        assert(data[0] == ord('E'))
+        self.uid = unpack("<I", data[1:5])[0]
+        self.servertime = unpack("<I", data[5:9])[0]
+        self.emoji = data[9]
+
+    def __str__(self):
+        return "[{}] uid={} servertime={}secs emoji={}".format(type(self).__name__, self.uid, self.servertime, self.emoji)
 
 class Teleport_server(MazePacket):
     '''
@@ -162,20 +287,33 @@ class Teleport_server(MazePacket):
         bs += pack("<i", int(self.teleport_player_z * 10000.0))
         return bs
 
-class HeartBeat_server(MazePacket):
+class Flag_server(MazePacket):
     '''
-        [0]     : <cmd byte> == 0x3c
-        [1]     : '3'
-        [02:10] : int64 # to compute RTT (ping)
-        [10:18] : int64 # servermanager->start_server_time or smth
+        [0]     : 'C'
+        [1:3]   : 'SCG
+        Remaining data is a null-terminated flag.
     '''
     def __init__(self, data):
-        #FIXME:
-        pass
+        assert(data[:4] == b'CSCG')
+        self.flag = data.decode('ascii')
 
     def __str__(self):
-        return "[{}]".format(type(self).__name__)
+        return "[{}] flag={}".format(type(self).__name__, self.flag)
 
+class Death_server(MazePacket):
+    def __init__(self, data):
+        assert(data[0] == ord('D'))
+
+    def __str__(self):
+        return "[{}] You died".format(type(self).__name__)
+
+class Respawn_server(MazePacket):
+    def __init__(self, data):
+        assert(data[0] == ord(' '))
+        self.msg = data.decode('ascii')
+
+    def __str__(self):
+        return "[{}] Player respawned: {}".format(type(self).__name__, self.msg)
 
 def run_tests():
     groundtruth_hex_stream = "9901a5a921f31d85f7aca07d800da7a6a7a8a9aa" # sample heartbeat packet from wireshark
