@@ -29,5 +29,13 @@ class MyProxy(proxy.UDPProxy):
             .append_handler(proxy.LogShortHexHandler(log_condition_cb, print_direction=False))
 
 if __name__ == "__main__":
-    proxy = MyProxy('0.0.0.0:1337', 'original.game.liveoverflo:1337')
+    # Example for testing it locally:
+    # Client <--> Proxy (0.0.0.1:1337) <--> Server (example.com:4000)
+    #
+    # Run server: nc -ul 127.0.0.1 4000
+    # Run proxy : python example-proxy.py
+    # Run client: nc -u 127.0.0.1 1337
+    #  * Now type some message in the client prompt. The server will return you the same message but in all capitals!
+
+    proxy = MyProxy('0.0.0.0:1337', '127.0.0.1:1337')
     proxy.run()
