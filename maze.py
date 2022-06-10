@@ -320,11 +320,58 @@ class Respawn_server(MazePacket):
     def __str__(self):
         return "[{}] Player respawned: {}".format(type(self).__name__, self.msg)
 
+class Race_server(MazePacket):
+    def __init__(self, data):
+        assert(data[0] == ord('R'))
+        self.last_checkpoint_id = data[1]
+
+    def __str__(self):
+        return "[{}] Race last_checkpoint_id: {:02d}".format(type(self).__name__, self.last_checkpoint_id)
+
+
 class MazeMap:
     # Values that self.maze_grid can take
     CAN_PASS=1
     BLOCKED=0
     _VISITED=137
+
+    # Checkpoints as captured byt the proxy while running on the yellow circles
+    checkpoints_global = [
+        (204.9578, 195.2503),
+        (182.1452, 180.6163),
+        (170.8877, 204.8691),
+        (187.8209, 231.0911),
+        (165.9041, 235.2535),
+        (152.6259, 186.3755),
+        (175.1935, 162.1687),
+        (167.96,   119.8896),
+        (124.123,  97.6725 ),
+        (120.516,  126.46  ),
+        (113.1027, 189.7454),
+        (77.3631,  208.2097),
+        (64.1885,  209.2672)
+    ]
+
+    # The above global checkpoints, converted to the corresponding positions in the self.maze_grid
+    # Conversion done using formulas:
+    # x = [round((x-8.1 + 3.75)/7.5*6) for x in x]
+    # y = [round((y-6.4 + 3.75)/7.5*6) for y in y]
+    # and then some manual adjustments
+    checkpoints_grid = [
+        (159, 153),
+        (141, 141),
+        (135, 165),
+        (147, 183),
+        (129, 189),
+        (117, 147),
+        (135, 129),
+        (129,  93),
+        (99,   75),
+        (93,   99),
+        (87,  153),
+        (57,  165),
+        (45,  165),
+    ]
 
     def __init__(self):
         img_file='/home/nikos/ctfs/maze/Maze_v2_linux/top-down-views/processed/maze.png'
@@ -384,6 +431,12 @@ class MazeMap:
         x,y = zip(*self.ENDS.values())
         plt.scatter(x, y, c='red', edgecolor='black', marker='o', s=6, linewidths=2)
         plt.scatter([self.START[0]], [self.START[1]], c='red', edgecolor='black', marker='o', s=6, linewidths=2)
+
+
+        x,y = zip(*self.checkpoints_grid)
+        plt.scatter(x, y, c='blue', marker='s', s=6, linewidths=2)
+        for i,xi,yi in zip(list(range(len(x))), x, y):
+            plt.text(xi*(1.01), yi*(1.01) , str(i), fontsize=10, c='red')
 
         plt.show()
 
@@ -449,6 +502,17 @@ class MazeMap:
             prev_y = y
         return list(safe_path)
 
+    def calc_canonical_racing_path(self):
+        long_path = set()
+        start = self.START
+        for end in self.checkpoints_grid:
+            path = self.find_path(start, end)
+            path = self.canonicalize_path(path)
+            long_path = long_path.union(path)
+            start = end
+        for end in self.checkpoints_grid:
+            assert(end in long_path)
+        return list(long_path)
 
     def draw_minimap(self, frames):
         # BLOCKING!
@@ -490,13 +554,15 @@ def run_tests():
     print("Output  : " + plaintext.hex())
     print()
 
-    print('Path to lava: ')
+    print('Path to lava and racing: ')
     map = MazeMap()
-    path = map.find_path(map.START, map.ENDS['lava'])
-    assert(path)
-    path = map.canonicalize_path(path)
-    map.show(paths=[path])
-    print(path)
+    lava_path = map.find_path(map.START, map.ENDS['lava'])
+    racing_path = map.calc_canonical_racing_path()
+    assert(lava_path)
+    assert(racing_path)
+    lava_path = map.canonicalize_path(lava_path)
+    map.show(paths=[lava_path, racing_path])
+
 
 if __name__ == "__main__":
     run_tests()
