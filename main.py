@@ -9,6 +9,7 @@ import socket
 import time
 import copy
 import os
+import numpy as np
 import proxy
 import maze
 
@@ -70,10 +71,15 @@ class MazeParsingHandler(proxy.AbstractHandler):
 
 class MazeDispatchHandler(proxy.AbstractHandler):
     #TODO: add more
+    #TODO: handle > 1 players
     def Login_client_dispatcher(self, login):
         with self._lock:
             self.usersecret = login.usersecret
             self.username   = login.username
+            self.players[login.usersecret] = {
+                'username' : login.username,
+                'position' : None
+            }
 
     def HeartBeat_client_dispatcher(self, heartbeat):
         with self._lock:
@@ -82,9 +88,8 @@ class MazeDispatchHandler(proxy.AbstractHandler):
     def Emoji_client_dispatcher(self, emoji):
         pass
     def Position_client_dispatcher(self, position):
-        pass
-
-
+        with self._lock:
+            self.players[position.usersecret]['position'] = (position.positionX, position.positionY, position.positionZ)
 
     def LoginConfirm_server_dispatcher(self, loginConfirm):
         with self._lock:
@@ -110,6 +115,9 @@ class MazeDispatchHandler(proxy.AbstractHandler):
     def __init__(self):
         super().__init__()
         self.start_server_time = None
+        self.usersecret = None
+        self.username = None
+        self.players = {}
         self.dispatcher = {
             maze.Login_client       :   self.Login_client_dispatcher,
             maze.HeartBeat_client   :   self.HeartBeat_client_dispatcher,
@@ -155,6 +163,7 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
 
     def Position_client_dispatcher(self, position):
         #TODO: this should be done only based on our secret
+        super().Position_client_dispatcher(position)
         with self._lock:
             self._last_Position_client = position
 
@@ -163,9 +172,15 @@ class MyMazeDispatchHandler(MazeDispatchHandler):
             res = copy.deepcopy(self._last_Position_client)
         return res
 
+
 class MazeProxy(proxy.UDPProxy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.map = maze.MazeMap()
+
+        # path = self.map.find_path(self.map.START, self.map.ENDS['lava'])
+        # path = self.map.canonicalize_path(path)
+        # self.map.show(paths=[path])
 
         blacklist = [maze.HeartBeat_client, maze.HeartBeat_server] # filter out heartbeats from logs
         def log_condition_cb(packet, direction, *args, **kwargs):
@@ -184,10 +199,40 @@ class MazeProxy(proxy.UDPProxy):
             .append_handler(cipherSuiteHandlers.encryptionHandler)
 
     def run(self):
+        LOGGER.info("Starting injector thread")
         injector_thread = threading.Thread(target=self.command_injector)
         injector_thread.start()
+
+        LOGGER.info("Starting minimap thread")
+        minimap_thread = threading.Thread(target=self.minimap_renderer)
+        minimap_thread.start()
+
         super().run()
+
         injector_thread.join()
+        minimap_thread.join()
+
+    def minimap_renderer(self):
+        def frames():
+            pos = None
+            while True:
+                pos = self._myMazeDispatchHandler.get_last_Position_client()
+                if pos and pos.usersecret == self._myMazeDispatchHandler.usersecret:
+                    # Results from {relative,absolute}_wall.txt
+                    # absolute X in range [8.1, 480.6]. Consecutive diff 7.5
+                    # absolute Z in range [6.4, 478.9]. Consecutive diff 7.5
+                    #
+                    # relative X in range [0, 378]. Consecutive diff 6.0
+                    # relative Z in range [0, 378]. Consecutive diff 6.0
+                    #
+                    # We map the absolute X,Z to a block and then the block to relative X,Z.
+                    # The player is placed in the center of the block.
+                    x = round((pos.positionX-8.1 + 3.75)/7.5*6)
+                    z = round((pos.positionZ-6.4 + 3.75)/7.5*6)
+                    yield (x, z)
+                else:
+                    yield (None, None)
+        self.map.draw_minimap(frames)
 
     def command_injector(self):
         usersecret = None

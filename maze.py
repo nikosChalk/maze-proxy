@@ -1,7 +1,12 @@
 
+import numpy as np
+from matplotlib import pyplot as plt
+from matplotlib import animation
+import imageio
+from copy import deepcopy
+from queue import Queue
 from struct import pack,unpack
-from abc import ABC, abstractmethod
-
+from abc import ABC
 
 def encrypt_data(data, rand1, rand2):
     '''data - bytes'''
@@ -315,6 +320,156 @@ class Respawn_server(MazePacket):
     def __str__(self):
         return "[{}] Player respawned: {}".format(type(self).__name__, self.msg)
 
+class MazeMap:
+    # Values that self.maze_grid can take
+    CAN_PASS=1
+    BLOCKED=0
+    _VISITED=137
+
+    def __init__(self):
+        img_file='/home/nikos/ctfs/maze/Maze_v2_linux/top-down-views/processed/maze.png'
+        img = imageio.imread(img_file)
+
+        if img_file.endswith('.bmp'):
+            width, height = img.shape
+        elif img_file.endswith('.png'):
+            width, height = img.shape[:2]
+            grayscale_img = np.zeros((width, height))
+            for row in range(height):
+                for col in range(width):
+                    r,g,b = img[row,col]
+                    grayscale_img[row,col] = int(0.2989*r + 0.5870*g + 0.1140*b) # RGB to grayscale conversion
+            img = grayscale_img
+        else:
+            assert(False) # not tested
+
+        if 'condensed' in img_file:
+            assert((width,height) == (64, 64))
+            self.scale = 1
+        else:
+            assert((width,height) == (384, 384))
+            self.scale = 6
+
+        # CAREFUL while translating coordinates from unity/walls.txt to here! In python:
+        #   * You use (row,column) instead of (x,z). So (x,z) in unity translates to (z,x) in python.
+        #   * img has (0,0) at top-left, while unity has bottom-left
+        # start, end positions are calculated based on a 64x64 grid and scaled up for the rest of grids
+        #   * We make sure that they are a multiple of 6 during construction
+        # self.START = tuple(np.array([64-32, 36])*self.scale) # (x,z)=36,32
+        # self.ENDS = {
+        #     'lava' : tuple(np.array([64-62, 52])*self.scale), # (x,z)=(52,62)
+        #     'tower': tuple(np.array([64-54, 4])*self.scale) , # (x,z)=(4,54)
+        #     'space': tuple(np.array([64-4, 28])*self.scale) , # (x,z)=(28,4)
+        # }
+        self.START = (207, 195) # (x,z). scale 6 assumed
+        self.ENDS = {
+            'lava' : (315, 369),
+            'tower': ( 27, 321),
+            'space': (171,  33),
+        }
+
+        self.maze_grid = np.ones((width, height), dtype=np.int8)
+        for row in range(height):
+            for col in range(width):
+                # self.maze_grid[row,col] = self.CAN_PASS if img[row,col] > 128 else self.BLOCKED
+                self.maze_grid[height-1-row,col] = self.CAN_PASS if img[row,col] > 128 else self.BLOCKED # We want (0,0) on bottom-left
+
+    def show(self, paths=[]):
+        plt.imshow(self.maze_grid, origin='lower')
+
+        for path in paths:
+            x,y = zip(*path)
+            plt.scatter(x, y, c='red', marker='s', s=3)
+
+        x,y = zip(*self.ENDS.values())
+        plt.scatter(x, y, c='red', edgecolor='black', marker='o', s=6, linewidths=2)
+        plt.scatter([self.START[0]], [self.START[1]], c='red', edgecolor='black', marker='o', s=6, linewidths=2)
+
+        plt.show()
+
+    def find_path(self, start, end):
+        """Find a path from start to end
+        Args:
+            start (tuple): (x,y) start point
+            end (tuple): (x,y) start point
+
+        Returns:
+            list[tuple]: List of (x,y) points
+        """
+        def getadjacent(n):
+            x,y = n
+            return [(x-1,y),(x,y-1),(x+1,y),(x,y+1)]
+
+        grid = deepcopy(self.maze_grid)
+        queue = Queue()
+        queue.put([start]) # Wrapping the start tuple in a list
+
+        while not queue.empty():
+            path = queue.get()
+            position = path[-1]
+            if position == end:
+                return path
+
+            for adjacent in getadjacent(position):
+                x,y = adjacent
+                if grid[y,x] == self.CAN_PASS: # can pass
+                    # # For larger scales, avoid near-wall points
+                    # if self.scale >= 3 and adjacent != end and (np.array(list(map(lambda idx: grid[idx], getadjacent(adjacent)))) == self.BLOCKED).any():
+                    #     continue
+                    grid[y,x] = self._VISITED # Change state to avoid revisiting this position.
+                    queue.put(path + [adjacent]) # new list
+        return None
+
+    def canonicalize_path(self, path):
+        """Canonicalize the given path by going through the middle of the blocks.
+        Start/end might change a little bit.
+
+        Args:
+            path (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        safe_path = set()
+        for i in range(len(path)):
+            x = path[i][0]//self.scale*self.scale+(self.scale//2)
+            y = path[i][1]//self.scale*self.scale+(self.scale//2)
+            if len(safe_path) == 0:
+                safe_path.add((x,y))
+            else:
+                if prev_x == x:
+                    for i in range(min(prev_y, y), max(prev_y, y)+1):
+                        safe_path.add((x, i))
+                elif prev_y == y:
+                    for i in range(min(prev_x, x), max(prev_x, x)+1):
+                        safe_path.add((i, y))
+                else:
+                    assert(False)
+            prev_x = x
+            prev_y = y
+        return list(safe_path)
+
+
+    def draw_minimap(self, frames):
+        # BLOCKING!
+        # https://matplotlib.org/stable/api/_as_gen/matplotlib.animation.FuncAnimation.html
+        def init_func():
+            img = imageio.imread('/home/nikos/ctfs/maze/Maze_v2_linux/top-down-views/processed/maze-overlay.png')
+            width, height = img.shape[:2]
+            return [plt.imshow(img, extent=[0,width,0,height])]
+
+        fig = plt.figure()
+        artist = plt.plot([], [], color='g', marker='s', markersize=6)[0]
+        def animate(args):
+            x,z = args
+            if x is not None and z is not None:
+                artist.set_data([x], [z])
+            return [artist]
+
+        anim = animation.FuncAnimation(fig, animate, init_func=init_func, frames=frames, interval=200, blit=True)
+        plt.show()
+
+
 def run_tests():
     groundtruth_hex_stream = "9901a5a921f31d85f7aca07d800da7a6a7a8a9aa" # sample heartbeat packet from wireshark
 
@@ -334,6 +489,14 @@ def run_tests():
     print("Expected: " + expected_plaintext.hex())
     print("Output  : " + plaintext.hex())
     print()
+
+    print('Path to lava: ')
+    map = MazeMap()
+    path = map.find_path(map.START, map.ENDS['lava'])
+    assert(path)
+    path = map.canonicalize_path(path)
+    map.show(paths=[path])
+    print(path)
 
 if __name__ == "__main__":
     run_tests()
